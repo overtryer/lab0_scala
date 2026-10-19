@@ -25,14 +25,14 @@ object Command:
 
 def printMenu(): Unit =
   println()
-  println("МЕНЮ")
+  println("=== Меню ===")
   Command.menuItems.zipWithIndex.foreach { case (cmd, i) => println(f"${i + 1}%2d. ${cmd.title}") }
   println(f"${Command.exitNumber}%2d. ${Command.Exit.title}")
   print("Выберите пункт: ")
 
 @main def run(): Unit =
   println("==============================================")
-  println("   Переносное резервное хранилище (ЛР0)")
+  println("   Переносное резервное хранилище")
   println("==============================================")
 
   val configPath = Paths.get("src/main/scala/config.json")
@@ -40,8 +40,8 @@ def printMenu(): Unit =
   ConfigLoader.load(configPath) match
     case Right(config) =>
       val logger = Logger(config.logFile)
-      logger.info("Приложение запущено.")
-      logger.info(s"Конфигурация загружена успешно. Алгоритм: ${config.hashAlgorithm}")
+      logger.info("Приложение запущено")
+      logger.info("Конфигурация загружена успешно")
 
       println(s"Конфиг загружен.")
       println(s"Логи пишутся в: ${config.logFile}")
@@ -49,7 +49,7 @@ def printMenu(): Unit =
       println("==============================================\n")
 
       App.run(config, logger)
+      logger.info("Приложение завершило работу")
 
     case Left(error) =>
       println(s"Ошибка конфига: ${error.message}")
-      println("Приложение не может быть запущено без корректной конфигурации.")

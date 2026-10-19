@@ -116,8 +116,6 @@ object Storage:
       sources = o("sources").arr.map(sourceFromJson).toList
     )
 
-  // ОПЕРАЦИИ
-
   def createNew(path: Path, session: StorageSession, key: Option[SecretKeySpec]): Either[AppError, Unit] =
     if Files.exists(path) then Left(AppError.StorageAlreadyExists(path.toString))
     else
@@ -128,7 +126,7 @@ object Storage:
           zos.write(jsonStr.getBytes("UTF-8"))
           zos.closeEntry()
         }
-      }.toEither.left.map(e => AppError.StorageIoError(s"Не удалось создать: ${e.getMessage}"))
+      }.toEither.left.map(e => AppError.StorageIoError(s"Ошибка создания: ${e.getMessage}"))
 
   def readSession(path: Path, key: Option[SecretKeySpec]): Either[AppError, StorageSession] =
     if !Files.exists(path) then Left(AppError.StorageNotFound(path.toString))
@@ -144,7 +142,7 @@ object Storage:
         }
       }.toEither.left.map(e => AppError.StorageCorrupted(e.getMessage))
 
-  def saveSession(session: StorageSession, filesToAdd: Map[Hash, Path], key: Option[SecretKeySpec]): Either[AppError, Unit] =
+  def saveSession(session: StorageSession, filesToAdd: Map[Hash, Path], key: Option[SecretKeySpec], config: AppConfig): Either[AppError, Unit] =
     val containerPath = session.storageFile
     val tempPath = containerPath.resolveSibling(containerPath.getFileName.toString + ".tmp")
 
@@ -153,9 +151,12 @@ object Storage:
         ZipFile(containerPath.toFile),
         ZipOutputStream(FileOutputStream(tempPath.toFile))
       ) { (oldZip, zos) =>
-        val requiredHashes = (session.manifest.files.values.map(_.hash) ++
-          session.versions.flatMap(_.manifest.files.values.map(_.hash))).map(_.hex).toSet
-        
+        val allEntries = (session.manifest.files.values ++ session.versions.flatMap(_.manifest.files.values)).toList
+        val groupedByFile = allEntries.groupBy(e => (e.sourceId, e.relPath))
+        val requiredHashes = groupedByFile.values.flatMap { entries =>
+          entries.map(_.hash).distinct.take(config.maximumVersionsPerFile)
+        }.map(_.hex).toSet
+
         oldZip.entries().asScala.toList
           .filter(_.getName.startsWith("blobs/"))
           .filter { entry =>
@@ -167,15 +168,21 @@ object Storage:
             Using.resource(oldZip.getInputStream(entry)) { is => zos.write(is.readAllBytes()) }
             zos.closeEntry()
           }
+
         filesToAdd.foreach { case (hash, filePath) =>
           val entryName = s"blobs/${hash.hex}"
           if oldZip.getEntry(entryName) == null then
+            val scanner = Scanner(config.hashAlgorithm)
+            val currentHash = scanner.hashFile(filePath)
+            if currentHash != hash then
+              throw new RuntimeException(s"Файл изменился во время копирования: $filePath")
             zos.putNextEntry(ZipEntry(entryName))
             val rawBytes = Files.readAllBytes(filePath)
             val dataToWrite = key.map(k => Crypto.encrypt(rawBytes, k)).getOrElse(rawBytes)
             zos.write(dataToWrite)
             zos.closeEntry()
         }
+
         zos.putNextEntry(ZipEntry("session.json"))
         val jsonBytes = sessionToJson(session).render(indent = 2).getBytes("UTF-8")
         zos.write(jsonBytes)
@@ -185,7 +192,7 @@ object Storage:
       ()
     }.toEither.left.map { e =>
       Files.deleteIfExists(tempPath)
-      AppError.StorageIoError(s"Ошибка записи: ${e.getMessage}")
+      AppError.StorageIoError(s"Ошибка сохранения: ${e.getMessage}")
     }
 
   def extractFile(containerPath: Path, hash: Hash, destPath: Path, key: Option[SecretKeySpec]): Either[AppError, Unit] =
@@ -200,10 +207,8 @@ object Storage:
         Using.resource(zip.getInputStream(entry)) { is =>
           val rawBytes = is.readAllBytes()
           val dataToWrite = key match
-            case Some(k) =>
-              Crypto.decrypt(rawBytes, k).fold(e => throw new RuntimeException(e.message), identity)
+            case Some(k) => Crypto.decrypt(rawBytes, k).fold(e => throw new RuntimeException(e.message), identity)
             case None    => rawBytes
-
           Files.write(destPath, dataToWrite)
           ()
         }

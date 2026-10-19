@@ -111,7 +111,7 @@ object ChangeStats:
         case Change.Added(e)                => acc.copy(added = acc.added + 1, newBytes = acc.newBytes + e.size)
         case Change.Modified(_, current)    => acc.copy(modified = acc.modified + 1, newBytes = acc.newBytes + current.size)
         case Change.Removed(_)              => acc.copy(removed = acc.removed + 1)
-        case Change.Renamed(_, current)     => acc.copy(renamed = acc.renamed + 1, newBytes = acc.newBytes + current.size)
+        case Change.Renamed(_, current)     => acc.copy(renamed = acc.renamed + 1)
         case Change.Unreadable(_, _, _)     => acc.copy(unreadable = acc.unreadable + 1)
         case Change.SourceUnavailable(_, _) => acc.copy(unavailable = acc.unavailable + 1)
     }

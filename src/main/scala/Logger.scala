@@ -14,7 +14,6 @@ class Logger(logPath: String):
     val timestamp = LocalDateTime.now().format(formatter)
     val line = s"[$timestamp] [$level] $message\n"
     val path = Paths.get(logPath)
-    
     Try {
       Option(path.getParent).foreach(Files.createDirectories(_))
       Files.writeString(path, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
