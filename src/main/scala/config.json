@@ -1,0 +1,16 @@
+{
+  "logFile": "backup.log",
+  "keyDirectory": "keys",
+  "defaultContainerName": "backup.store",
+  "checkOnStorageOpen": true,
+  "confirmBeforeBackup": true,
+  "confirmBeforeRestoreOverwrite": true,
+  "maximumVersionsPerFile": 2,
+  "hashAlgorithm": "SHA-256",
+  "defaultExclusions": [
+    "*.tmp",
+    "*.log",
+    "cache",
+    "node_modules"
+  ]
+}
