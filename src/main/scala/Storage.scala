@@ -4,6 +4,7 @@ import java.io.FileOutputStream
 import javax.crypto.spec.SecretKeySpec
 import scala.jdk.CollectionConverters.*
 import scala.util.{Try, Using}
+import java.time.Instant
 
 object Storage:
 
@@ -146,54 +147,108 @@ object Storage:
     val containerPath = session.storageFile
     val tempPath = containerPath.resolveSibling(containerPath.getFileName.toString + ".tmp")
 
-    Try {
-      Using.resources(
-        ZipFile(containerPath.toFile),
-        ZipOutputStream(FileOutputStream(tempPath.toFile))
-      ) { (oldZip, zos) =>
-        val allEntries = (session.manifest.files.values ++ session.versions.flatMap(_.manifest.files.values)).toList
-        val groupedByFile = allEntries.groupBy(e => (e.sourceId, e.relPath))
-        val requiredHashes = groupedByFile.values.flatMap { entries =>
-          entries.map(_.hash).distinct.take(config.maximumVersionsPerFile)
-        }.map(_.hex).toSet
+    val result = for
+      _ <- withOpenArchive(containerPath, tempPath) { (oldZip, zos) =>
+        for
+          _ <- copyOldBlobs(oldZip, zos, collectRequiredHashes(session, config))
+          _ <- copyNewBlobs(oldZip, zos, filesToAdd, key, config)
+          _ <- writeSessionJson(zos, session)
+        yield ()
+      }
+      _ <- atomicMove(tempPath, containerPath)
+    yield ()
 
-        oldZip.entries().asScala.toList
-          .filter(_.getName.startsWith("blobs/"))
-          .filter { entry =>
-            val hashHex = entry.getName.substring(6)
-            requiredHashes.contains(hashHex)
-          }
-          .foreach { entry =>
-            zos.putNextEntry(ZipEntry(entry.getName))
-            Using.resource(oldZip.getInputStream(entry)) { is => zos.write(is.readAllBytes()) }
-            zos.closeEntry()
-          }
+    result match
+      case Left(err) =>
+        try Files.deleteIfExists(tempPath) catch {
+          case _: Exception => ()
+        }
+        Left(err)
+      case Right(_) => Right(())
 
-        filesToAdd.foreach { case (hash, filePath) =>
-          val entryName = s"blobs/${hash.hex}"
-          if oldZip.getEntry(entryName) == null then
-            val scanner = Scanner(config.hashAlgorithm)
+  private def withOpenArchive(containerPath: Path, tempPath: Path)(
+    body: (ZipFile, ZipOutputStream) => Either[AppError, Unit]
+  ): Either[AppError, Unit] =
+    try
+      val oldZip = ZipFile(containerPath.toFile)
+      try
+        val zos = ZipOutputStream(FileOutputStream(tempPath.toFile))
+        try body(oldZip, zos)
+        finally zos.close()
+      finally oldZip.close()
+    catch
+      case e: Exception => Left(AppError.StorageIoError(s"Ошибка сохранения: ${e.getMessage}"))
+
+  private def collectRequiredHashes(session: StorageSession, config: AppConfig): Set[String] =
+    val currentHashes = session.manifest.files.values.map(_.hash.hex).toSet
+    
+    val historicalHashes = session.versions
+      .sortBy(_.createdAt)(using Ordering[Instant].reverse)
+      .flatMap(_.manifest.files.values)
+      .groupBy(e => (e.sourceId, e.relPath))
+      .values
+      .flatMap(_.map(_.hash).distinct.take(config.maximumVersionsPerFile))
+      .map(_.hex)
+      .toSet
+
+    currentHashes ++ historicalHashes      
+
+  private def copyOldBlobs(oldZip: ZipFile, zos: ZipOutputStream, requiredHashes: Set[String]): Either[AppError, Unit] =
+    try
+      oldZip.entries().asScala.toList
+        .filter(_.getName.startsWith("blobs/"))
+        .filter { entry =>
+          val hashHex = entry.getName.substring(6)
+          requiredHashes.contains(hashHex)
+        }
+        .foreach { entry =>
+          zos.putNextEntry(ZipEntry(entry.getName))
+          Using.resource(oldZip.getInputStream(entry)) { is => zos.write(is.readAllBytes()) }
+          zos.closeEntry()
+        }
+      Right(())
+    catch
+      case e: Exception => Left(AppError.StorageIoError(s"Ошибка копирования старых блобов: ${e.getMessage}"))
+
+  private def copyNewBlobs(oldZip: ZipFile, zos: ZipOutputStream, filesToAdd: Map[Hash, Path], key: Option[SecretKeySpec], config: AppConfig): Either[AppError, Unit] =
+    val scanner = Scanner(config.hashAlgorithm)
+    filesToAdd.foldLeft[Either[AppError, Unit]](Right(())) {
+      case (Left(err), _) => Left(err)
+      case (Right(_), (hash, filePath)) =>
+        val entryName = s"blobs/${hash.hex}"
+        if oldZip.getEntry(entryName) != null then Right(())
+        else
+          try
             val currentHash = scanner.hashFile(filePath)
             if currentHash != hash then
-              throw new RuntimeException(s"Файл изменился во время копирования: $filePath")
-            zos.putNextEntry(ZipEntry(entryName))
-            val rawBytes = Files.readAllBytes(filePath)
-            val dataToWrite = key.map(k => Crypto.encrypt(rawBytes, k)).getOrElse(rawBytes)
-            zos.write(dataToWrite)
-            zos.closeEntry()
-        }
-
-        zos.putNextEntry(ZipEntry("session.json"))
-        val jsonBytes = sessionToJson(session).render(indent = 2).getBytes("UTF-8")
-        zos.write(jsonBytes)
-        zos.closeEntry()
-      }
-      Files.move(tempPath, containerPath, StandardCopyOption.REPLACE_EXISTING)
-      ()
-    }.toEither.left.map { e =>
-      Files.deleteIfExists(tempPath)
-      AppError.StorageIoError(s"Ошибка сохранения: ${e.getMessage}")
+              Left(AppError.FileChangedDuringCopy(filePath.toString))
+            else
+              zos.putNextEntry(ZipEntry(entryName))
+              val rawBytes = Files.readAllBytes(filePath)
+              val dataToWrite = key.map(k => Crypto.encrypt(rawBytes, k)).getOrElse(rawBytes)
+              zos.write(dataToWrite)
+              zos.closeEntry()
+              Right(())
+          catch
+            case e: Exception => Left(AppError.StorageIoError(s"Ошибка копирования блоба ${hash.hex}: ${e.getMessage}"))
     }
+
+  private def writeSessionJson(zos: ZipOutputStream, session: StorageSession): Either[AppError, Unit] =
+    try
+      zos.putNextEntry(ZipEntry("session.json"))
+      val jsonBytes = sessionToJson(session).render(indent = 2).getBytes("UTF-8")
+      zos.write(jsonBytes)
+      zos.closeEntry()
+      Right(())
+    catch
+      case e: Exception => Left(AppError.StorageIoError(s"Ошибка записи session.json: ${e.getMessage}"))
+
+  private def atomicMove(tempPath: Path, containerPath: Path): Either[AppError, Unit] =
+    try
+      Files.move(tempPath, containerPath, StandardCopyOption.REPLACE_EXISTING)
+      Right(())
+    catch
+      case e: Exception => Left(AppError.StorageIoError(s"Ошибка атомарной замены: ${e.getMessage}"))
 
   def extractFile(containerPath: Path, hash: Hash, destPath: Path, key: Option[SecretKeySpec]): Either[AppError, Unit] =
     Try {
@@ -208,7 +263,7 @@ object Storage:
           val rawBytes = is.readAllBytes()
           val dataToWrite = key match
             case Some(k) => Crypto.decrypt(rawBytes, k).fold(e => throw new RuntimeException(e.message), identity)
-            case None    => rawBytes
+            case None => rawBytes
           Files.write(destPath, dataToWrite)
           ()
         }

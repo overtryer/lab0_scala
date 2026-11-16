@@ -3,7 +3,12 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import scala.util.Try
 
-class Logger(logPath: String):
+trait Logger:
+  def info(message: String): Unit
+  def warn(message: String): Unit
+  def error(message: String): Unit
+
+class FileLogger(logPath: String) extends Logger:
   private val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
   def info(message: String): Unit  = write("INFO", message)

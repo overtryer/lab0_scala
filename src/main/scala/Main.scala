@@ -1,4 +1,3 @@
-import scala.io.StdIn
 import java.nio.file.Paths
 
 enum Command(val title: String):
@@ -23,33 +22,34 @@ object Command:
       else menuItems.lift(n - 1)
     }
 
-def printMenu(): Unit =
-  println()
-  println("=== Меню ===")
-  Command.menuItems.zipWithIndex.foreach { case (cmd, i) => println(f"${i + 1}%2d. ${cmd.title}") }
-  println(f"${Command.exitNumber}%2d. ${Command.Exit.title}")
-  print("Выберите пункт: ")
+def printMenu(ui: Ui): Unit =
+  ui.println()
+  ui.println("=== Меню ===")
+  Command.menuItems.zipWithIndex.foreach { case (cmd, i) => ui.println(f"${i + 1}%2d. ${cmd.title}") }
+  ui.println(f"${Command.exitNumber}%2d. ${Command.Exit.title}")
+  ui.print("Выберите пункт: ")
 
 @main def run(): Unit =
   println("==============================================")
   println("   Переносное резервное хранилище")
   println("==============================================")
 
+  val ui = new ConsoleUi()
   val configPath = Paths.get("src/main/scala/config.json")
 
   ConfigLoader.load(configPath) match
     case Right(config) =>
-      val logger = Logger(config.logFile)
+      val logger: Logger = new FileLogger(config.logFile)
       logger.info("Приложение запущено")
       logger.info("Конфигурация загружена успешно")
 
-      println(s"Конфиг загружен.")
-      println(s"Логи пишутся в: ${config.logFile}")
-      println(s"Алгоритм хеширования: ${config.hashAlgorithm}")
-      println("==============================================\n")
+      ui.println(s"Конфиг загружен.")
+      ui.println(s"Логи пишутся в: ${config.logFile}")
+      ui.println(s"Алгоритм хеширования: ${config.hashAlgorithm}")
+      ui.println("==============================================\n")
 
-      App.run(config, logger)
+      App.run(config, logger, ui)
       logger.info("Приложение завершило работу")
 
     case Left(error) =>
-      println(s"Ошибка конфига: ${error.message}")
+      ui.println(s"Ошибка конфига: ${error.message}")
